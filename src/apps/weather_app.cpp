@@ -1,12 +1,36 @@
 #include "apps/weather_app.h"
 #include "hal/display.h"
 #include "hal/buzzer.h"
+#include "hal/storage.h"
 #include "services/wifi_service.h"
 #include "ui/nav_bar.h"
+#include "ui/keyboard.h"
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
+static const char* WEATHER_CITY_FILE = "/weather_city.json";
+
 WeatherData WeatherApp::current_weather = { 0.0f, 0.0f, 0, false, "Sin datos" };
+String WeatherApp::current_city_name = "Madrid";
+float WeatherApp::current_lat = 40.4168f;
+float WeatherApp::current_lon = -3.7038f;
+
+static WeatherApp* instance = nullptr;
+static String search_city_buffer = "";
+
+static const CityPreset PRESETS[] = {
+    { "Madrid",    40.4168f, -3.7038f },
+    { "Barcelona", 41.3879f,  2.1699f },
+    { "Valencia",  39.4699f, -0.3763f },
+    { "Sevilla",   37.3891f, -5.9845f },
+    { "Zaragoza",  41.6561f, -0.8773f },
+    { "Malaga",    36.7213f, -4.4214f },
+    { "Bilbao",    43.2630f, -2.9350f },
+    { "Palma",     39.5696f,  2.6502f },
+    { "Alicante",  38.3452f, -0.4810f },
+    { "Granada",   37.1773f, -3.5986f }
+};
+static const int PRESET_COUNT = sizeof(PRESETS) / sizeof(PRESETS[0]);
 
 static String get_wmo_description(int code) {
     switch (code) {
@@ -34,13 +58,86 @@ static String get_wmo_description(int code) {
     }
 }
 
+void WeatherApp::load_city_config() {
+    if (!storage_file_exists(WEATHER_CITY_FILE)) return;
+    String json = storage_read_file(WEATHER_CITY_FILE);
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, json);
+    if (!err) {
+        const char* name = doc["name"];
+        if (name && strlen(name) > 0) current_city_name = name;
+        current_lat = doc["lat"] | 40.4168f;
+        current_lon = doc["lon"] | -3.7038f;
+    }
+}
+
+void WeatherApp::save_city_config() {
+    JsonDocument doc;
+    doc["name"] = current_city_name;
+    doc["lat"] = current_lat;
+    doc["lon"] = current_lon;
+    String out;
+    serializeJson(doc, out);
+    storage_write_file(WEATHER_CITY_FILE, out);
+}
+
+void WeatherApp::set_city(const String& name, float lat, float lon) {
+    current_city_name = name;
+    current_lat = lat;
+    current_lon = lon;
+    save_city_config();
+    current_weather.valid = false;
+    fetch_weather();
+}
+
+String WeatherApp::get_city_name() {
+    return current_city_name;
+}
+
+bool WeatherApp::geocode_and_set_city(const String& city_query) {
+    if (!wifi_service_is_connected()) return false;
+
+    // Codificar espacios si los hay
+    String clean_query = city_query;
+    clean_query.trim();
+    clean_query.replace(" ", "%20");
+
+    HTTPClient http;
+    http.setTimeout(6000);
+    String url = "http://geocoding-api.open-meteo.com/v1/search?name=" + clean_query + "&count=1&language=es&format=json";
+    http.begin(url);
+    int httpCode = http.GET();
+
+    if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, payload);
+        if (!err && doc.containsKey("results")) {
+            JsonObject first = doc["results"][0];
+            const char* found_name = first["name"] | city_query.c_str();
+            float lat = first["latitude"] | 0.0f;
+            float lon = first["longitude"] | 0.0f;
+
+            if (lat != 0.0f || lon != 0.0f) {
+                set_city(found_name, lat, lon);
+                http.end();
+                return true;
+            }
+        }
+    }
+    http.end();
+    return false;
+}
+
 bool WeatherApp::fetch_weather() {
     if (!wifi_service_is_connected()) return false;
 
     HTTPClient http;
     http.setTimeout(5000);
-    // API de Open-Meteo (Madrid por defecto; libre sin API key)
-    http.begin("http://api.open-meteo.com/v1/forecast?latitude=40.4168&longitude=-3.7038&current_weather=true");
+    String url = "http://api.open-meteo.com/v1/forecast?latitude=" + 
+                 String(current_lat, 4) + "&longitude=" + String(current_lon, 4) + 
+                 "&current_weather=true";
+    http.begin(url);
     int httpCode = http.GET();
 
     if (httpCode == HTTP_CODE_OK) {
@@ -62,16 +159,91 @@ bool WeatherApp::fetch_weather() {
     return false;
 }
 
+static void on_city_search_done(bool saved) {
+    if (saved && search_city_buffer.length() > 0 && instance) {
+        tft.fillRect(10, 100, SCREEN_WIDTH - 20, 60, COLOR_CARD);
+        tft.drawRoundRect(10, 100, SCREEN_WIDTH - 20, 60, 4, COLOR_HIGHLIGHT);
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextColor(COLOR_HIGHLIGHT, COLOR_CARD);
+        tft.drawString("Buscando coordenadas...", 120, 130, &fonts::Font2);
+
+        bool ok = WeatherApp::geocode_and_set_city(search_city_buffer);
+        if (ok) {
+            buzzer_notification();
+        } else {
+            buzzer_beep(800, 200);
+        }
+    }
+    search_city_buffer = "";
+    if (instance) {
+        instance->on_draw();
+    }
+}
+
 void WeatherApp::on_enter() {
+    instance = this;
+    is_selecting_city = false;
     nav_bar_set_action("ACTUALIZAR");
+    load_city_config();
     if (!current_weather.valid && wifi_service_is_connected()) {
         fetch_weather();
     }
 }
 
-void WeatherApp::on_exit() {}
+void WeatherApp::on_exit() {
+    instance = nullptr;
+}
 
 void WeatherApp::on_update() {}
+
+void WeatherApp::draw_city_selector() {
+    tft.fillRect(0, STATUS_BAR_HEIGHT, SCREEN_WIDTH, CONTENT_HEIGHT, COLOR_BG);
+
+    // Cabecera selector
+    tft.fillRect(6, 28, SCREEN_WIDTH - 12, 28, COLOR_CARD);
+    tft.drawRoundRect(6, 28, SCREEN_WIDTH - 12, 28, 4, COLOR_CARD_BORDER);
+
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
+    tft.drawString("SELECCIONAR CIUDAD", 14, 42, &fonts::Font2);
+
+    // Botón Cerrar [X]
+    tft.fillRoundRect(SCREEN_WIDTH - 38, 30, 28, 24, 3, COLOR_DANGER);
+    tft.setTextColor(COLOR_TEXT, COLOR_DANGER);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("X", SCREEN_WIDTH - 24, 42, &fonts::Font2);
+
+    // Botón BUSCAR CON TECLADO
+    tft.fillRoundRect(8, 60, SCREEN_WIDTH - 16, 30, 4, COLOR_CARD);
+    tft.drawRoundRect(8, 60, SCREEN_WIDTH - 16, 30, 4, COLOR_ACCENT);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(COLOR_HIGHLIGHT, COLOR_CARD);
+    tft.drawString("BUSCAR CON TECLADO...", 120, 75, &fonts::Font2);
+
+    // Parrilla de ciudades frecuentes (2 columnas x 5 filas)
+    int16_t start_y = 96;
+    int16_t card_w = 108;
+    int16_t card_h = 32;
+    int16_t gap_y = 6;
+
+    for (int i = 0; i < PRESET_COUNT; ++i) {
+        int col = i % 2;
+        int row = i / 2;
+        int16_t x = 8 + col * (card_w + 8);
+        int16_t y = start_y + row * (card_h + gap_y);
+
+        bool is_current = (current_city_name.equalsIgnoreCase(PRESETS[i].name));
+        uint16_t bg = is_current ? COLOR_ACCENT : COLOR_CARD;
+        uint16_t txt = is_current ? COLOR_BG : COLOR_TEXT;
+
+        tft.fillRoundRect(x, y, card_w, card_h, 4, bg);
+        tft.drawRoundRect(x, y, card_w, card_h, 4, is_current ? COLOR_HIGHLIGHT : COLOR_CARD_BORDER);
+
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextColor(txt, bg);
+        tft.drawString(PRESETS[i].name, x + card_w / 2, y + card_h / 2, &fonts::Font2);
+    }
+}
 
 void WeatherApp::draw_weather_card() {
     tft.fillRect(0, STATUS_BAR_HEIGHT, SCREEN_WIDTH, CONTENT_HEIGHT, COLOR_BG);
@@ -96,20 +268,29 @@ void WeatherApp::draw_weather_card() {
     }
 
     // Tarjeta del tiempo
-    tft.fillRect(8, 30, SCREEN_WIDTH - 16, 250, COLOR_CARD);
-    tft.drawRoundRect(8, 30, SCREEN_WIDTH - 16, 250, 6, COLOR_ACCENT);
+    tft.fillRect(8, 30, SCREEN_WIDTH - 16, 252, COLOR_CARD);
+    tft.drawRoundRect(8, 30, SCREEN_WIDTH - 16, 252, 6, COLOR_ACCENT);
 
-    // Ciudad
+    // Ciudad actual
     tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(COLOR_ACCENT, COLOR_CARD);
-    tft.drawString("MADRID / LOCAL", 16, 40, &fonts::Font2);
+    tft.setTextColor(COLOR_HIGHLIGHT, COLOR_CARD);
+    String city_upper = current_city_name;
+    city_upper.toUpperCase();
+    tft.drawString(city_upper.c_str(), 16, 38, &fonts::Font4);
 
     tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD);
-    tft.drawString("Open-Meteo Service", 16, 58, &fonts::Font0);
+    tft.drawString("Open-Meteo API", 16, 62, &fonts::Font0);
 
-    // Dibujar icono climático gráfico
-    int16_t icon_x = 70;
-    int16_t icon_y = 115;
+    // Botón [CAMBIAR CIUDAD] arriba a la derecha
+    tft.fillRoundRect(SCREEN_WIDTH - 88, 36, 76, 26, 4, COLOR_BTN_DEFAULT);
+    tft.drawRoundRect(SCREEN_WIDTH - 88, 36, 76, 26, 4, COLOR_ACCENT);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(COLOR_ACCENT, COLOR_BTN_DEFAULT);
+    tft.drawString("CIUDAD", SCREEN_WIDTH - 50, 49, &fonts::Font2);
+
+    // Icono climático gráfico
+    int16_t icon_x = 65;
+    int16_t icon_y = 118;
     if (current_weather.weather_code <= 1) {
         // Sol
         tft.fillCircle(icon_x, icon_y, 22, COLOR_HIGHLIGHT);
@@ -131,34 +312,92 @@ void WeatherApp::draw_weather_card() {
     tft.setTextColor(COLOR_TEXT, COLOR_CARD);
     char temp_buf[16];
     snprintf(temp_buf, sizeof(temp_buf), "%.1f C", current_weather.temp);
-    tft.drawString(temp_buf, 120, 115, &fonts::Font6);
+    tft.drawString(temp_buf, 115, 118, &fonts::Font6);
 
     // Condición meteorológica
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(COLOR_HIGHLIGHT, COLOR_CARD);
     tft.drawString(current_weather.condition_text.c_str(), 120, 168, &fonts::Font4);
 
-    tft.drawFastHLine(20, 192, SCREEN_WIDTH - 40, COLOR_CARD_BORDER);
+    tft.drawFastHLine(20, 194, SCREEN_WIDTH - 40, COLOR_CARD_BORDER);
 
     // Viento y detalles
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD);
     char wind_buf[32];
     snprintf(wind_buf, sizeof(wind_buf), "Viento: %.1f km/h", current_weather.windspeed);
-    tft.drawString(wind_buf, 120, 210, &fonts::Font2);
+    tft.drawString(wind_buf, 120, 212, &fonts::Font2);
 
     tft.setTextColor(COLOR_SUCCESS, COLOR_CARD);
-    tft.drawString("Pronostico actualizado en vivo", 120, 235, &fonts::Font0);
+    tft.drawString("Pronostico en tiempo real", 120, 238, &fonts::Font0);
 }
 
 void WeatherApp::on_draw() {
-    draw_weather_card();
+    if (is_selecting_city) {
+        nav_bar_set_action("VOLVER");
+        draw_city_selector();
+    } else {
+        nav_bar_set_action("ACTUALIZAR");
+        draw_weather_card();
+    }
+    nav_bar_draw();
 }
 
 bool WeatherApp::on_touch(int16_t tx, int16_t ty, bool is_new_press) {
     if (!is_new_press) return false;
 
-    // Si no hay wifi y toca el botón "Abrir Ajustes"
+    // Si estamos en el selector de ciudades
+    if (is_selecting_city) {
+        // Botón Cerrar [X] (SCREEN_WIDTH - 38 a -10, Y: 30 a 54)
+        if (tx >= SCREEN_WIDTH - 38 && tx <= SCREEN_WIDTH - 10 && ty >= 30 && ty <= 54) {
+            buzzer_click();
+            is_selecting_city = false;
+            on_draw();
+            return true;
+        }
+
+        // Botón BUSCAR CON TECLADO (Y: 60 a 90)
+        if (tx >= 8 && tx <= SCREEN_WIDTH - 8 && ty >= 60 && ty <= 90) {
+            buzzer_click();
+            search_city_buffer = "";
+            keyboard_open(&search_city_buffer, "Buscar Ciudad", on_city_search_done);
+            is_selecting_city = false;
+            return true;
+        }
+
+        // Toque en parrilla de ciudades predefinidas
+        int16_t start_y = 96;
+        int16_t card_w = 108;
+        int16_t card_h = 32;
+        int16_t gap_y = 6;
+
+        for (int i = 0; i < PRESET_COUNT; ++i) {
+            int col = i % 2;
+            int row = i / 2;
+            int16_t x = 8 + col * (card_w + 8);
+            int16_t y = start_y + row * (card_h + gap_y);
+
+            if (tx >= x && tx <= x + card_w && ty >= y && ty <= y + card_h) {
+                buzzer_notification();
+                set_city(PRESETS[i].name, PRESETS[i].lat, PRESETS[i].lon);
+                is_selecting_city = false;
+                on_draw();
+                return true;
+            }
+        }
+        return true;
+    }
+
+    // Si estamos en la pantalla principal del tiempo
+    // Botón [CIUDAD] (SCREEN_WIDTH - 88 a SCREEN_WIDTH - 12, Y: 36 a 62)
+    if (tx >= SCREEN_WIDTH - 88 && tx <= SCREEN_WIDTH - 12 && ty >= 36 && ty <= 62) {
+        buzzer_click();
+        is_selecting_city = true;
+        on_draw();
+        return true;
+    }
+
+    // Si no hay WiFi y pulsa "Abrir Ajustes"
     if (!wifi_service_is_connected()) {
         if (tx >= 30 && tx <= (SCREEN_WIDTH - 30) && ty >= 150 && ty <= 182) {
             buzzer_click();
@@ -167,16 +406,23 @@ bool WeatherApp::on_touch(int16_t tx, int16_t ty, bool is_new_press) {
             return true;
         }
     }
+
     return false;
 }
 
 void WeatherApp::on_nav_action() {
     buzzer_click();
+    if (is_selecting_city) {
+        is_selecting_city = false;
+        on_draw();
+        return;
+    }
+
     if (wifi_service_is_connected()) {
         tft.fillRect(16, 230, SCREEN_WIDTH - 32, 20, COLOR_CARD);
         tft.setTextDatum(MC_DATUM);
         tft.setTextColor(COLOR_WARNING, COLOR_CARD);
-        tft.drawString("Descargando...", 120, 240, &fonts::Font0);
+        tft.drawString("Actualizando...", 120, 240, &fonts::Font0);
 
         fetch_weather();
         buzzer_notification();
