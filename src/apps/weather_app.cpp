@@ -112,7 +112,7 @@ bool WeatherApp::geocode_and_set_city(const String& city_query) {
         String payload = http.getString();
         JsonDocument doc;
         DeserializationError err = deserializeJson(doc, payload);
-        if (!err && doc.containsKey("results")) {
+        if (!err && doc["results"].is<JsonArray>()) {
             JsonObject first = doc["results"][0];
             const char* found_name = first["name"] | city_query.c_str();
             float lat = first["latitude"] | 0.0f;
@@ -257,8 +257,8 @@ void WeatherApp::draw_weather_card() {
         tft.drawString("WiFi Desconectado", 120, 80, &fonts::Font2);
 
         tft.setTextColor(COLOR_TEXT, COLOR_CARD);
-        tft.drawString("Conecta el WiFi en 'AJUSTES'", 120, 110, &fonts::Font0);
-        tft.drawString("para ver el pronostico del tiempo.", 120, 126, &fonts::Font0);
+        tft.drawString("Conecta el WiFi en 'AJUSTES'", 120, 110, &fonts::Font2);
+        tft.drawString("para ver el pronostico.", 120, 130, &fonts::Font0);
 
         tft.fillRoundRect(30, 150, SCREEN_WIDTH - 60, 32, 4, COLOR_BTN_DEFAULT);
         tft.drawRoundRect(30, 150, SCREEN_WIDTH - 60, 32, 4, COLOR_CARD_BORDER);
@@ -267,69 +267,102 @@ void WeatherApp::draw_weather_card() {
         return;
     }
 
-    // Tarjeta del tiempo
-    tft.fillRect(8, 30, SCREEN_WIDTH - 16, 252, COLOR_CARD);
-    tft.drawRoundRect(8, 30, SCREEN_WIDTH - 16, 252, 6, COLOR_ACCENT);
+    const int16_t card_x = 8;
+    const int16_t card_y = 27;
+    const int16_t card_w = SCREEN_WIDTH - 16; // 224
+    const int16_t card_h = 260;
 
-    // Ciudad actual
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(COLOR_HIGHLIGHT, COLOR_CARD);
-    String city_upper = current_city_name;
-    city_upper.toUpperCase();
-    tft.drawString(city_upper.c_str(), 16, 38, &fonts::Font4);
+    // 1. Fondo de la tarjeta
+    tft.fillRoundRect(card_x, card_y, card_w, card_h, 6, COLOR_CARD);
 
+    // 2. Fila superior: etiqueta "UBICACIÓN" y botón [CIUDAD]
+    tft.setTextDatum(ML_DATUM);
     tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD);
-    tft.drawString("Open-Meteo API", 16, 62, &fonts::Font0);
+    tft.drawString("UBICACION:", card_x + 10, card_y + 15, &fonts::Font0);
 
-    // Botón [CAMBIAR CIUDAD] arriba a la derecha
-    tft.fillRoundRect(SCREEN_WIDTH - 88, 36, 76, 26, 4, COLOR_BTN_DEFAULT);
-    tft.drawRoundRect(SCREEN_WIDTH - 88, 36, 76, 26, 4, COLOR_ACCENT);
+    // Botón [CIUDAD]
+    const int16_t btn_city_x = card_x + card_w - 76;
+    const int16_t btn_city_y = card_y + 6;
+    const int16_t btn_city_w = 68;
+    const int16_t btn_city_h = 20;
+    tft.fillRoundRect(btn_city_x, btn_city_y, btn_city_w, btn_city_h, 3, COLOR_BTN_DEFAULT);
+    tft.drawRoundRect(btn_city_x, btn_city_y, btn_city_w, btn_city_h, 3, COLOR_ACCENT);
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(COLOR_ACCENT, COLOR_BTN_DEFAULT);
-    tft.drawString("CIUDAD", SCREEN_WIDTH - 50, 49, &fonts::Font2);
+    tft.drawString("CIUDAD", btn_city_x + btn_city_w / 2, btn_city_y + btn_city_h / 2, &fonts::Font0);
 
-    // Icono climático gráfico
-    int16_t icon_x = 65;
-    int16_t icon_y = 118;
+    // 3. Fila de la ciudad (centrada, ancho completo para nombres largos)
+    String city_upper = current_city_name;
+    city_upper.toUpperCase();
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(COLOR_HIGHLIGHT, COLOR_CARD);
+    if (city_upper.length() > 10) {
+        tft.drawString(city_upper.c_str(), 120, card_y + 36, &fonts::Font2);
+    } else {
+        tft.drawString(city_upper.c_str(), 120, card_y + 36, &fonts::Font4);
+    }
+
+    tft.drawFastHLine(card_x + 14, card_y + 54, card_w - 28, COLOR_CARD_BORDER);
+
+    // 4. Icono climático gráfico y Temperatura
+    int16_t icon_x = card_x + 46;
+    int16_t icon_y = card_y + 95;
+
     if (current_weather.weather_code <= 1) {
         // Sol
-        tft.fillCircle(icon_x, icon_y, 22, COLOR_HIGHLIGHT);
-        tft.drawCircle(icon_x, icon_y, 26, COLOR_WARNING);
+        tft.fillCircle(icon_x, icon_y, 20, COLOR_HIGHLIGHT);
+        tft.drawCircle(icon_x, icon_y, 24, COLOR_WARNING);
     } else if (current_weather.weather_code <= 3) {
         // Sol con nube
-        tft.fillCircle(icon_x - 10, icon_y - 10, 14, COLOR_HIGHLIGHT);
-        tft.fillRoundRect(icon_x - 14, icon_y, 36, 18, 9, COLOR_TEXT_MUTED);
+        tft.fillCircle(icon_x - 8, icon_y - 8, 14, COLOR_HIGHLIGHT);
+        tft.fillRoundRect(icon_x - 14, icon_y - 2, 38, 20, 10, COLOR_TEXT_MUTED);
     } else {
         // Nube con lluvia
-        tft.fillRoundRect(icon_x - 14, icon_y - 6, 36, 18, 9, COLOR_TEXT_MUTED);
-        tft.drawLine(icon_x - 8, icon_y + 16, icon_x - 12, icon_y + 24, COLOR_ACCENT);
-        tft.drawLine(icon_x, icon_y + 16, icon_x - 4, icon_y + 24, COLOR_ACCENT);
-        tft.drawLine(icon_x + 8, icon_y + 16, icon_x + 4, icon_y + 24, COLOR_ACCENT);
+        tft.fillRoundRect(icon_x - 14, icon_y - 6, 38, 20, 10, COLOR_TEXT_MUTED);
+        tft.drawLine(icon_x - 8, icon_y + 18, icon_x - 12, icon_y + 26, COLOR_ACCENT);
+        tft.drawLine(icon_x, icon_y + 18, icon_x - 4, icon_y + 26, COLOR_ACCENT);
+        tft.drawLine(icon_x + 8, icon_y + 18, icon_x + 4, icon_y + 26, COLOR_ACCENT);
     }
 
     // Gran temperatura
+    char temp_str[16];
+    snprintf(temp_str, sizeof(temp_str), "%.1f", current_weather.temp);
     tft.setTextDatum(ML_DATUM);
     tft.setTextColor(COLOR_TEXT, COLOR_CARD);
-    char temp_buf[16];
-    snprintf(temp_buf, sizeof(temp_buf), "%.1f C", current_weather.temp);
-    tft.drawString(temp_buf, 115, 118, &fonts::Font6);
+    tft.drawString(temp_str, icon_x + 36, icon_y, &fonts::Font6);
 
-    // Condición meteorológica
+    // Símbolo de grados (°) y C
+    int16_t temp_text_w = tft.textWidth(temp_str, &fonts::Font6);
+    int16_t deg_x = icon_x + 36 + temp_text_w + 4;
+    int16_t deg_y = icon_y - 14;
+    tft.drawCircle(deg_x, deg_y, 3, COLOR_TEXT);
+    tft.drawCircle(deg_x, deg_y, 2, COLOR_TEXT);
+    tft.setTextDatum(TL_DATUM);
+    tft.drawString("C", deg_x + 6, deg_y - 3, &fonts::Font4);
+
+    // 5. Condición meteorológica
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(COLOR_HIGHLIGHT, COLOR_CARD);
-    tft.drawString(current_weather.condition_text.c_str(), 120, 168, &fonts::Font4);
+    tft.drawString(current_weather.condition_text.c_str(), 120, card_y + 142, &fonts::Font4);
 
-    tft.drawFastHLine(20, 194, SCREEN_WIDTH - 40, COLOR_CARD_BORDER);
+    tft.drawFastHLine(card_x + 16, card_y + 166, card_w - 32, COLOR_CARD_BORDER);
 
-    // Viento y detalles
+    // 6. Viento y estado
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD);
     char wind_buf[32];
     snprintf(wind_buf, sizeof(wind_buf), "Viento: %.1f km/h", current_weather.windspeed);
-    tft.drawString(wind_buf, 120, 212, &fonts::Font2);
+    tft.drawString(wind_buf, 120, card_y + 184, &fonts::Font2);
 
     tft.setTextColor(COLOR_SUCCESS, COLOR_CARD);
-    tft.drawString("Pronostico en tiempo real", 120, 238, &fonts::Font0);
+    tft.drawString("Pronostico en tiempo real", 120, card_y + 208, &fonts::Font2);
+
+    tft.setTextColor(COLOR_TEXT_MUTED, COLOR_CARD);
+    tft.drawString("Open-Meteo API Service", 120, card_y + 232, &fonts::Font0);
+
+    // 7. Borde exterior azul: SE DIBUJA AL FINAL PARA CERRAR PERFECTAMENTE
+    tft.drawRoundRect(card_x, card_y, card_w, card_h, 6, COLOR_ACCENT);
+    tft.drawRoundRect(card_x + 1, card_y + 1, card_w - 2, card_h - 2, 5, COLOR_ACCENT);
 }
 
 void WeatherApp::on_draw() {
@@ -388,9 +421,10 @@ bool WeatherApp::on_touch(int16_t tx, int16_t ty, bool is_new_press) {
         return true;
     }
 
-    // Si estamos en la pantalla principal del tiempo
-    // Botón [CIUDAD] (SCREEN_WIDTH - 88 a SCREEN_WIDTH - 12, Y: 36 a 62)
-    if (tx >= SCREEN_WIDTH - 88 && tx <= SCREEN_WIDTH - 12 && ty >= 36 && ty <= 62) {
+    // Si estamos en la pantalla principal del tiempo:
+    // Botón [CIUDAD] (x: 148 a 230, y: 30 a 58) O toque en el nombre de la ciudad (x: 16 a 224, y: 56 a 86)
+    if ((tx >= 148 && tx <= 230 && ty >= 30 && ty <= 58) ||
+        (tx >= 16 && tx <= 224 && ty >= 56 && ty <= 86)) {
         buzzer_click();
         is_selecting_city = true;
         on_draw();

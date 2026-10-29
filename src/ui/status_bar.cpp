@@ -40,14 +40,14 @@ void status_bar_draw(bool force) {
     tft.setTextColor(COLOR_ACCENT, COLOR_HEADER);
     tft.drawString(current_title, 8, STATUS_BAR_HEIGHT / 2, &fonts::Font2);
 
-    // Indicador WiFi
-    int16_t wifi_x = SCREEN_WIDTH - 65;
+    // Indicador WiFi (separado limpiamente a la izquierda de la hora)
+    tft.setTextDatum(MR_DATUM);
     if (wifi_ok) {
         tft.setTextColor(COLOR_SUCCESS, COLOR_HEADER);
-        tft.drawString("WiFi", wifi_x, STATUS_BAR_HEIGHT / 2, &fonts::Font0);
+        tft.drawString("WiFi", SCREEN_WIDTH - 64, STATUS_BAR_HEIGHT / 2, &fonts::Font0);
     } else {
         tft.setTextColor(COLOR_TEXT_MUTED, COLOR_HEADER);
-        tft.drawString("----", wifi_x, STATUS_BAR_HEIGHT / 2, &fonts::Font0);
+        tft.drawString("----", SCREEN_WIDTH - 64, STATUS_BAR_HEIGHT / 2, &fonts::Font0);
     }
 
     // Hora actual a la derecha
